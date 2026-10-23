@@ -4,7 +4,6 @@ import com.github.gotify.api.Api
 import com.github.gotify.api.ApiException
 import com.github.gotify.api.Callback
 import com.github.gotify.client.api.MessageApi
-import com.github.gotify.client.model.Message
 import com.github.gotify.client.model.PagedMessages
 import org.tinylog.kotlin.Logger
 
@@ -23,9 +22,15 @@ internal class MessageRequester(private val messageApi: MessageApi) {
         }
     }
 
-    fun asyncRemoveMessage(message: Message) {
-        Logger.info("Removing message with id ${message.id}")
-        messageApi.deleteMessage(message.id).enqueue(Callback.call())
+    // FORK: accept a message id and report the result so offline deletions can be queued
+    fun asyncRemoveMessage(messageId: Long, onResult: (Boolean) -> Unit = {}) {
+        Logger.info("Removing message with id $messageId")
+        messageApi.deleteMessage(messageId).enqueue(
+            Callback.call<Void>(
+                onSuccess = Callback.SuccessCallback<Void> { onResult(true) },
+                onError = { onResult(false) }
+            )
+        )
     }
 
     fun deleteAll(appId: Long): Boolean {

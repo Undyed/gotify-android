@@ -3,14 +3,28 @@ package com.github.gotify
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import androidx.preference.PreferenceManager
 import com.github.gotify.client.model.User
+import com.github.gotify.fork.EndpointResolver
 
 internal class Settings(context: Context) {
     private val sharedPreferences: SharedPreferences
+    private val defaultPreferences: SharedPreferences
     val filesDir: String
     var url: String
+        // FORK: follow the endpoint currently selected (public or intranet address)
+        get() = EndpointResolver.current ?: sharedPreferences.getString("url", "")!!
+        set(value) {
+            sharedPreferences.edit { putString("url", value) }
+            EndpointResolver.onPrimaryChanged()
+        }
+    // FORK: the configured (public) address, independent of the currently selected endpoint
+    val storedUrl: String
         get() = sharedPreferences.getString("url", "")!!
-        set(value) = sharedPreferences.edit { putString("url", value) }
+    // FORK: optional internal address, stored in the default preferences (settings screen)
+    var backupUrl: String
+        get() = defaultPreferences.getString("backupUrl", "") ?: ""
+        set(value) = defaultPreferences.edit { putString("backupUrl", value) }
     var token: String?
         get() = sharedPreferences.getString("token", null)
         set(value) = sharedPreferences.edit { putString("token", value) }
@@ -54,6 +68,7 @@ internal class Settings(context: Context) {
 
     init {
         sharedPreferences = context.getSharedPreferences("gotify", Context.MODE_PRIVATE)
+        defaultPreferences = PreferenceManager.getDefaultSharedPreferences(context)
         filesDir = context.filesDir.absolutePath
     }
 

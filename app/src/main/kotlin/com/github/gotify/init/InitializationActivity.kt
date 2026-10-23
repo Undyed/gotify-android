@@ -13,12 +13,6 @@ import androidx.core.net.toUri
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.github.gotify.R
 import com.github.gotify.Settings
-import com.github.gotify.api.ApiException
-import com.github.gotify.api.Callback
-import com.github.gotify.api.Callback.SuccessCallback
-import com.github.gotify.api.ClientFactory
-import com.github.gotify.client.model.User
-import com.github.gotify.client.model.VersionInfo
 import com.github.gotify.login.LoginActivity
 import com.github.gotify.messages.MessagesActivity
 import com.github.gotify.service.WebSocketService
@@ -36,7 +30,7 @@ internal class InitializationActivity : AppCompatActivity() {
     @RequiresApi(Build.VERSION_CODES.S)
     private val activityResultLauncher =
         registerForActivityResult(StartActivityForResult()) {
-            requestAlarmPermissionOrAuthenticate()
+            requestAlarmPermissionOrOpenMessages()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,10 +44,10 @@ internal class InitializationActivity : AppCompatActivity() {
             runWithPostNotificationsPermission {
                 if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU) {
                     // Android 14 and above
-                    requestAlarmPermissionOrAuthenticate()
+                    requestAlarmPermissionOrOpenMessages()
                 } else {
                     // Android 13 and below
-                    tryAuthenticate()
+                    openMessages()
                 }
             }
         } else {
@@ -62,10 +56,10 @@ internal class InitializationActivity : AppCompatActivity() {
     }
 
     @RequiresApi(Build.VERSION_CODES.S)
-    private fun requestAlarmPermissionOrAuthenticate() {
+    private fun requestAlarmPermissionOrOpenMessages() {
         val manager = ContextCompat.getSystemService(this, AlarmManager::class.java)
         if (manager?.canScheduleExactAlarms() == true) {
-            tryAuthenticate()
+            openMessages()
         } else {
             stopSlashScreen()
             alarmDialog()
@@ -78,46 +72,24 @@ internal class InitializationActivity : AppCompatActivity() {
         finish()
     }
 
-    private fun tryAuthenticate() {
-        ClientFactory.userApiWithToken(settings)
-            .currentUser()
-            .enqueue(
-                Callback.callInUI(
-                    this,
-                    onSuccess = Callback.SuccessBody { user -> authenticated(user) },
-                    onError = { exception -> failed(exception) }
-                )
-            )
+    // FORK-BEGIN: offline first startup. The session is validated by MessagesActivity in the
+    // background, so a missing network connection no longer blocks the app.
+    private fun openMessages() {
+        splashScreenActive = false
+        startActivity(Intent(this, MessagesActivity::class.java))
+        startPushService()
+        finish()
     }
 
-    private fun failed(exception: ApiException) {
-        stopSlashScreen()
-        when (exception.code) {
-            0 -> {
-                dialog(getString(R.string.not_available, settings.url))
-                return
-            }
-
-            401 -> {
-                dialog(getString(R.string.auth_failed))
-                return
-            }
+    private fun startPushService() {
+        val serviceIntent = Intent(this, WebSocketService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
         }
-
-        var response = exception.body
-        response = response.take(200)
-        dialog(getString(R.string.other_error, settings.url, exception.code, response))
     }
-
-    private fun dialog(message: String) {
-        MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.oops)
-            .setMessage(message)
-            .setPositiveButton(R.string.retry) { _, _ -> tryAuthenticate() }
-            .setNegativeButton(R.string.logout) { _, _ -> showLogin() }
-            .setCancelable(false)
-            .show()
-    }
+    // FORK-END
 
     @RequiresApi(Build.VERSION_CODES.S)
     private fun alarmDialog() {
@@ -133,43 +105,6 @@ internal class InitializationActivity : AppCompatActivity() {
             }
             .setCancelable(false)
             .show()
-    }
-
-    private fun authenticated(user: User) {
-        Logger.info("Authenticated as ${user.name}")
-
-        settings.setUser(user.name, user.admin)
-        requestVersion {
-            splashScreenActive = false
-            startActivity(Intent(this, MessagesActivity::class.java))
-            finish()
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(Intent(this, WebSocketService::class.java))
-        } else {
-            startService(Intent(this, WebSocketService::class.java))
-        }
-    }
-
-    private fun requestVersion(runnable: Runnable) {
-        requestVersion(
-            callback = Callback.SuccessBody { version: VersionInfo ->
-                Logger.info("Server version: ${version.version}@${version.buildDate}")
-                settings.serverVersion = version.version
-                runnable.run()
-            },
-            errorCallback = { runnable.run() }
-        )
-    }
-
-    private fun requestVersion(
-        callback: SuccessCallback<VersionInfo>,
-        errorCallback: Callback.ErrorCallback
-    ) {
-        ClientFactory.infoApi(settings)
-            .version
-            .enqueue(Callback.callInUI(this, callback, errorCallback))
     }
 
     private fun runWithPostNotificationsPermission(action: () -> Unit) {

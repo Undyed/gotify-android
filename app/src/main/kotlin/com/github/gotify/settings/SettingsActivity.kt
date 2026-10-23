@@ -21,6 +21,7 @@ import androidx.preference.SwitchPreferenceCompat
 import com.github.gotify.R
 import com.github.gotify.Utils
 import com.github.gotify.databinding.SettingsActivityBinding
+import com.github.gotify.fork.EndpointResolver
 import com.github.gotify.service.WebSocketService
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
@@ -63,6 +64,11 @@ internal class SettingsActivity :
                     this,
                     sharedPreferences.getString(key, getString(R.string.theme_default))!!
                 )
+            }
+            // FORK: re-evaluate public/internal endpoints when the backup address changes
+            "backupUrl" -> {
+                EndpointResolver.onPrimaryChanged()
+                EndpointResolver.probeAsync()
             }
         }
     }

@@ -28,7 +28,8 @@ internal class MissedMessageUtil(private val api: MessageApi) {
         try {
             var since: Long? = null
             while (true) {
-                val pagedMessages = Api.execute(api.getMessages(10, since))
+                // FORK: bigger pages, a long offline period otherwise needs dozens of round trips
+                val pagedMessages = Api.execute(api.getMessages(100, since))
                 val messages = pagedMessages.messages
                 val filtered = filter(messages, till)
                 result.addAll(filtered)

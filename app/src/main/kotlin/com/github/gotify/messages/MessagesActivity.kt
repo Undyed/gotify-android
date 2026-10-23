@@ -41,6 +41,7 @@ import com.github.gotify.Utils
 import com.github.gotify.Utils.launchCoroutine
 import com.github.gotify.api.Api
 import com.github.gotify.api.ApiException
+import com.github.gotify.api.Callback
 import com.github.gotify.api.ClientFactory
 import com.github.gotify.client.ApiClient
 import com.github.gotify.client.api.AuthApi
@@ -49,6 +50,7 @@ import com.github.gotify.client.api.MessageApi
 import com.github.gotify.client.model.Application
 import com.github.gotify.client.model.Message
 import com.github.gotify.databinding.ActivityMessagesBinding
+import com.github.gotify.fork.EndpointResolver
 import com.github.gotify.init.InitializationActivity
 import com.github.gotify.log.LogsActivity
 import com.github.gotify.login.LoginActivity
@@ -72,12 +74,20 @@ internal class MessagesActivity :
     private lateinit var viewModel: MessagesModel
     private var isLoadMore = false
     private var updateAppOnDrawerClose: Long? = null
+    private var offlineNotified = false // FORK
+    private var sessionDialogShown = false // FORK
+    private var receiverRegistered = false // FORK
     private lateinit var listMessageAdapter: ListMessageAdapter
     private lateinit var onBackPressedCallback: OnBackPressedCallback
 
     private val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val messageJson = intent.getStringExtra("message")
+            // FORK: refresh the list as soon as the websocket is connected again
+            if (intent.action == WebSocketService.CONNECTED_BROADCAST) {
+                refreshFromNetwork()
+                return
+            }
+            val messageJson = intent.getStringExtra("message") ?: return
             val message = Utils.JSON.fromJson(
                 messageJson,
                 Message::class.java
@@ -162,8 +172,14 @@ internal class MessagesActivity :
             .getBoolean(getString(R.string.setting_key_exclude_from_recent), false)
         Utils.setExcludeFromRecent(this, excludeFromRecent)
         launchCoroutine {
+            // FORK: when the websocket is already connected start from the network, otherwise show
+            // the offline cache first and refresh once the connection is back.
+            if (WebSocketService.connected) {
+                viewModel.messages.clear()
+            }
             updateMessagesForApplication(true, viewModel.appId)
         }
+        validateSession() // FORK
     }
 
     override fun onPostCreate(savedInstanceState: Bundle?) {
@@ -242,6 +258,7 @@ internal class MessagesActivity :
 
         val connection = headerView.findViewById<TextView>(R.id.header_connection)
         connection.text = settings.url
+        connection.setOnClickListener { showEndpointDialog() } // FORK
 
         val version = headerView.findViewById<TextView>(R.id.header_version)
         version.text =
@@ -311,18 +328,27 @@ internal class MessagesActivity :
     }
 
     override fun onResume() {
+        // FORK: the endpoint can change while this activity is in the background (automatic probe
+        // or a new internal address in the settings), the pinned Retrofit client would go stale.
+        if (viewModel.clientBaseUrl != viewModel.settings.url) {
+            super.onResume()
+            reloadForEndpoint()
+            return
+        }
         Logger.info("OnResume " + javaClass.simpleName)
         val context = applicationContext
         val nManager = context.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nManager.cancelAll()
         val filter = IntentFilter()
         filter.addAction(WebSocketService.NEW_MESSAGE_BROADCAST)
+        filter.addAction(WebSocketService.CONNECTED_BROADCAST) // FORK
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(receiver, filter, RECEIVER_EXPORTED)
         } else {
             @SuppressLint("UnspecifiedRegisterReceiverFlag")
             registerReceiver(receiver, filter)
         }
+        receiverRegistered = true // FORK
         launchCoroutine {
             updateMissedMessages(viewModel.messages.getLastReceivedMessage())
         }
@@ -343,7 +369,11 @@ internal class MessagesActivity :
     }
 
     override fun onPause() {
-        unregisterReceiver(receiver)
+        // FORK: onResume can return early (endpoint changed) before registering the receiver
+        if (receiverRegistered) {
+            unregisterReceiver(receiver)
+            receiverRegistered = false
+        }
         super.onPause()
     }
 
@@ -630,14 +660,128 @@ internal class MessagesActivity :
     private fun updateMessagesAndStopLoading(messageWithImages: List<MessageWithImage>) {
         isLoadMore = false
         stopLoading()
+        if (viewModel.messages.offline && !offlineNotified) { // FORK
+            offlineNotified = true
+            Utils.showSnackBar(this, getString(R.string.fork_offline_snackbar))
+        }
         if (messageWithImages.isEmpty()) {
             binding.flipper.displayedChild = 1
+            // FORK: do not claim "no messages" when the list is simply empty while offline
+            binding.root.findViewById<TextView>(R.id.textView2)?.setText(
+                if (viewModel.messages.offline) {
+                    R.string.fork_offline_empty
+                } else {
+                    R.string.no_messages_yet
+                }
+            )
         } else {
             binding.flipper.displayedChild = 0
         }
         val adapter = binding.messagesView.adapter as ListMessageAdapter
         adapter.updateList(messageWithImages)
     }
+
+    // FORK-BEGIN: offline mode, background session validation and endpoint switching
+    private fun refreshFromNetwork() {
+        if (isFinishing || isDestroyed) return
+        // The Retrofit client is bound to the URL it was created with, so a switched endpoint
+        // needs a fresh activity/model instead of a simple reload.
+        if (viewModel.clientBaseUrl != viewModel.settings.url) {
+            reloadForEndpoint()
+            return
+        }
+        launchCoroutine {
+            viewModel.messages.clear()
+            updateMessagesForApplication(true, viewModel.appId)
+        }
+    }
+
+    // Same as refreshAll(), but keeps the image cache: both addresses serve the same server.
+    private fun reloadForEndpoint() {
+        if (isFinishing || isDestroyed) return
+        startActivity(Intent(this, InitializationActivity::class.java))
+        finish()
+    }
+
+    private fun validateSession() {
+        ClientFactory.userApiWithToken(viewModel.settings).currentUser().enqueue(
+            Callback.callInUI(
+                this,
+                onSuccess = Callback.SuccessBody { user ->
+                    viewModel.settings.setUser(user.name, user.admin)
+                    updateHeaderUser()
+                    fetchServerVersion()
+                },
+                onError = { exception ->
+                    if (exception.code == 401) {
+                        showSessionExpired()
+                    }
+                }
+            )
+        )
+    }
+
+    private fun fetchServerVersion() {
+        ClientFactory.infoApi(viewModel.settings).version.enqueue(
+            Callback.callInUI(
+                this,
+                onSuccess = Callback.SuccessBody { version ->
+                    viewModel.settings.serverVersion = version.version
+                    updateHeaderVersion()
+                },
+                onError = {}
+            )
+        )
+    }
+
+    private fun updateHeaderUser() {
+        binding.navView.getHeaderView(0)
+            .findViewById<TextView>(R.id.header_user)
+            ?.text = viewModel.settings.user?.name
+    }
+
+    private fun updateHeaderVersion() {
+        binding.navView.getHeaderView(0)
+            .findViewById<TextView>(R.id.header_version)
+            ?.text = getString(
+                R.string.versions,
+                BuildConfig.VERSION_NAME,
+                viewModel.settings.serverVersion
+            )
+    }
+
+    private fun showSessionExpired() {
+        if (sessionDialogShown || isFinishing) return
+        sessionDialogShown = true
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.fork_session_expired_title)
+            .setMessage(R.string.fork_session_expired)
+            .setPositiveButton(R.string.login) { _, _ -> doLogout() }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun showEndpointDialog() {
+        val settings = viewModel.settings
+        val endpoints = listOfNotNull(
+            settings.storedUrl.takeIf { it.isNotBlank() },
+            settings.backupUrl.takeIf { it.isNotBlank() }
+        ).distinct()
+        val labels = mutableListOf(getString(R.string.fork_endpoint_auto))
+        labels.addAll(endpoints)
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.fork_endpoint_title)
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (which == 0) {
+                    EndpointResolver.override(null)
+                } else {
+                    EndpointResolver.override(endpoints[which - 1])
+                }
+                refreshFromNetwork()
+            }
+            .show()
+    }
+    // FORK-END
 
     private fun ListMessageAdapter.updateList(list: List<MessageWithImage>) {
         this.submitList(if (this.currentList == list) list.toList() else list) {

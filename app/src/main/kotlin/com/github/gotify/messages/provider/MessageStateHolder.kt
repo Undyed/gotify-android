@@ -27,7 +27,10 @@ internal class MessageStateHolder {
 
         state.apply {
             loaded = true
-            messages.addAll(pagedMessages.messages)
+            fromCache = false // FORK
+            // FORK: skip messages we already have, e.g. after hydrating from the offline cache
+            val known = messages.mapTo(HashSet()) { it.id }
+            messages.addAll(pagedMessages.messages.filterNot { it.id in known })
             hasNext = pagedMessages.paging.next != null
             nextSince = pagedMessages.paging.since
             this.appId = appId
@@ -38,6 +41,26 @@ internal class MessageStateHolder {
         // it is added again.
         if (deletionPending()) {
             deleteMessage(pendingDeletion!!.message)
+        }
+    }
+
+    // FORK: restore messages from the offline cache
+    @Synchronized
+    fun hydrate(appId: Long, messages: List<Message>) {
+        val state = state(appId)
+        if (state.loaded) return
+        state.apply {
+            loaded = true
+            hasNext = false
+            fromCache = true
+            nextSince = messages.lastOrNull()?.id ?: 0L
+            this.messages.addAll(messages)
+            this.appId = appId
+        }
+        states[appId] = state
+        val newest = messages.firstOrNull()?.id
+        if (newest != null && newest > lastReceivedMessage) {
+            lastReceivedMessage = newest
         }
     }
 

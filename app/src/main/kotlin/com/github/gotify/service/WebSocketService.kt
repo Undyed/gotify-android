@@ -32,11 +32,17 @@ import com.github.gotify.client.api.ApplicationApi
 import com.github.gotify.client.api.MessageApi
 import com.github.gotify.client.model.Application
 import com.github.gotify.client.model.Message
+import com.github.gotify.fork.Backfill
+import com.github.gotify.fork.EndpointResolver
+import com.github.gotify.fork.ForkPrefs
+import com.github.gotify.fork.MessageStore
+import com.github.gotify.fork.PendingSync
 import com.github.gotify.log.LoggerHelper
 import com.github.gotify.log.UncaughtExceptionHandler
 import com.github.gotify.messages.Extras
 import com.github.gotify.messages.IntentUrlDialogActivity
 import com.github.gotify.messages.MessagesActivity
+import com.github.gotify.messages.provider.MessageRequester
 import io.noties.markwon.Markwon
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -51,6 +57,12 @@ internal class WebSocketService : Service() {
     companion object {
         private val castAddition = if (BuildConfig.DEBUG) ".DEBUG" else ""
         val NEW_MESSAGE_BROADCAST = "${WebSocketService::class.java.name}.NEW_MESSAGE$castAddition"
+        // FORK: fired when the websocket is (re)connected, used to refresh cached lists
+        val CONNECTED_BROADCAST = "${WebSocketService::class.java.name}.CONNECTED$castAddition"
+
+        @Volatile
+        var connected = false
+            private set
         private const val NOT_LOADED = -2L
     }
 
@@ -61,12 +73,14 @@ internal class WebSocketService : Service() {
             override fun onAvailable(network: Network) {
                 super.onAvailable(network)
                 Logger.info("WebSocket: Network available, reconnect if needed.")
+                EndpointResolver.probeAsync() // FORK: may switch between intranet/extranet
                 connection?.start()
             }
 
             override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
                 super.onLinkPropertiesChanged(network, linkProperties)
                 Logger.info("WebSocket: Network properties changed, reconnect if needed.")
+                EndpointResolver.probeAsync() // FORK
                 connection?.start()
             }
         }
@@ -74,12 +88,20 @@ internal class WebSocketService : Service() {
 
     private val lastReceivedMessage = AtomicLong(NOT_LOADED)
     private lateinit var missingMessageUtil: MissedMessageUtil
+    private lateinit var store: MessageStore // FORK
+    private lateinit var prefs: ForkPrefs // FORK
 
     private lateinit var markwon: Markwon
 
     override fun onCreate() {
         super.onCreate()
         settings = Settings(this)
+        store = MessageStore.get(this) // FORK
+        prefs = ForkPrefs(this) // FORK
+        val persisted = prefs.lastReceivedMessageId
+        if (persisted > 0) {
+            lastReceivedMessage.set(persisted)
+        }
         val client = ClientFactory.clientToken(settings)
         missingMessageUtil = MissedMessageUtil(client.createService(MessageApi::class.java))
         Logger.info("Create ${javaClass.simpleName}")
@@ -88,6 +110,8 @@ internal class WebSocketService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        connected = false
+        store.flush() // FORK
         connection?.close()
 
         Logger.warn("Destroy ${javaClass.simpleName}")
@@ -109,6 +133,14 @@ internal class WebSocketService : Service() {
         UncaughtExceptionHandler.registerCurrentThread()
         showForegroundNotification(getString(R.string.websocket_init))
 
+        if (lastReceivedMessage.get() == NOT_LOADED) {
+            // FORK: fall back to the persisted id while offline, so reconnecting does not
+            // re-notify messages that were already shown.
+            val persisted = prefs.lastReceivedMessageId
+            if (persisted > 0) {
+                lastReceivedMessage.set(persisted)
+            }
+        }
         if (lastReceivedMessage.get() == NOT_LOADED) {
             missingMessageUtil.lastReceivedMessage { lastReceivedMessage.set(it) }
         }
@@ -156,6 +188,7 @@ internal class WebSocketService : Service() {
                     onSuccess = Callback.SuccessBody { apps ->
                         appIdToApp.clear()
                         appIdToApp.putAll(apps.associateBy { it.id })
+                        store.saveApps(apps) // FORK: keep app names/icons for offline mode
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                             NotificationSupport.createChannels(
                                 this,
@@ -164,12 +197,17 @@ internal class WebSocketService : Service() {
                             )
                         }
                     },
-                    onError = { appIdToApp.clear() }
+                    onError = {
+                        appIdToApp.clear()
+                        // FORK: fall back to cached applications so notifications keep icons
+                        store.loadApps().forEach { app -> appIdToApp[app.id] = app }
+                    }
                 )
             )
     }
 
     private fun onClose() {
+        connected = false // FORK
         showForegroundNotification(
             getString(R.string.websocket_closed),
             getString(R.string.websocket_reconnect)
@@ -202,7 +240,13 @@ internal class WebSocketService : Service() {
     }
 
     private fun onFailure(status: String, reconnectIn: Duration) {
-        val title = getString(R.string.websocket_error, status)
+        connected = false // FORK
+        EndpointResolver.onRequestFailed() // FORK: retry, possibly against the other endpoint
+        val title = if (status == "unreachable") {
+            getString(R.string.fork_offline_foreground)
+        } else {
+            getString(R.string.websocket_error, status)
+        }
         showForegroundNotification(
             title,
             getString(R.string.websocket_reconnect, reconnectIn.toString())
@@ -210,7 +254,24 @@ internal class WebSocketService : Service() {
     }
 
     private fun onOpen() {
+        connected = true // FORK
         showForegroundNotification(getString(R.string.websocket_listening))
+        sendBroadcast(Intent(CONNECTED_BROADCAST)) // FORK
+        Thread { syncAfterConnect() }.start() // FORK
+    }
+
+    // FORK: fill the offline cache with the last 7 days and replay queued deletions
+    private fun syncAfterConnect() {
+        try {
+            val api = ClientFactory.clientToken(settings).createService(MessageApi::class.java)
+            if (prefs.shouldBackfill()) {
+                Backfill.run(api, store)
+                prefs.markBackfilled()
+            }
+            PendingSync.replay(store, MessageRequester(api))
+        } catch (e: Exception) {
+            Logger.error(e, "Offline sync after connect failed")
+        }
     }
 
     private fun notifyMissedNotifications() {
@@ -239,6 +300,8 @@ internal class WebSocketService : Service() {
             }
             broadcast(message)
         }
+        store.append(messages) // FORK
+        prefs.lastReceivedMessageId = lastReceivedMessage.get() // FORK
         val size = messages.size
         showNotification(
             NotificationSupport.ID.GROUPED,
@@ -253,6 +316,8 @@ internal class WebSocketService : Service() {
         if (lastReceivedMessage.get() < message.id) {
             lastReceivedMessage.set(message.id)
         }
+        store.append(listOf(message)) // FORK
+        prefs.lastReceivedMessageId = lastReceivedMessage.get() // FORK
         broadcast(message)
         showNotification(
             message.id,

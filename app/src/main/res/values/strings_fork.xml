@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fork-only strings. Kept in a separate file so that merging upstream does not conflict. -->
+<resources>
+    <string name="fork_backup_url_title">Internal server URL</string>
+    <string name="fork_backup_url_summary">Optional. Used automatically when the primary URL is unreachable, e.g. on the home network.</string>
+    <string name="fork_offline_snackbar">Offline: showing messages cached in the last 7 days</string>
+    <string name="fork_offline_empty">Offline — no cached messages for this view yet</string>
+    <string name="fork_offline_foreground">Offline, waiting for network</string>
+    <string name="fork_endpoint_title">Server connection</string>
+    <string name="fork_endpoint_auto">Automatic</string>
+    <string name="fork_session_expired_title">Login required</string>
+    <string name="fork_session_expired">Your session is no longer valid. Please log in again.</string>
+</resources>
