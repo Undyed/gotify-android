@@ -8,6 +8,11 @@ plugins {
     id("org.jmailen.kotlinter") version "5.1.1"
 }
 
+// Release builds may override the version without touching this file:
+//   ./gradlew -PversionName=2.10.1-fork.1 -PversionCode=37 assembleRelease
+val versionNameOverride = providers.gradleProperty("versionName").orNull
+val versionCodeOverride = providers.gradleProperty("versionCode").orNull?.toIntOrNull()
+
 android {
     namespace = "com.github.gotify"
     compileSdk = 36
@@ -15,8 +20,8 @@ android {
         applicationId = "com.github.gotify"
         minSdk = 26
         targetSdk = 36
-        versionCode = 36
-        versionName = "2.10.1"
+        versionCode = versionCodeOverride ?: 36
+        versionName = versionNameOverride ?: "2.10.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         signingConfig = signingConfigs.getByName("debug")
