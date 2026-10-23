@@ -57,6 +57,7 @@ internal class WebSocketService : Service() {
     companion object {
         private val castAddition = if (BuildConfig.DEBUG) ".DEBUG" else ""
         val NEW_MESSAGE_BROADCAST = "${WebSocketService::class.java.name}.NEW_MESSAGE$castAddition"
+
         // FORK: fired when the websocket is (re)connected, used to refresh cached lists
         val CONNECTED_BROADCAST = "${WebSocketService::class.java.name}.CONNECTED$castAddition"
 

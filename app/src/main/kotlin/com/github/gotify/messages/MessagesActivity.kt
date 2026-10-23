@@ -741,13 +741,14 @@ internal class MessagesActivity :
     }
 
     private fun updateHeaderVersion() {
+        val version = getString(
+            R.string.versions,
+            BuildConfig.VERSION_NAME,
+            viewModel.settings.serverVersion
+        )
         binding.navView.getHeaderView(0)
             .findViewById<TextView>(R.id.header_version)
-            ?.text = getString(
-                R.string.versions,
-                BuildConfig.VERSION_NAME,
-                viewModel.settings.serverVersion
-            )
+            ?.text = version
     }
 
     private fun showSessionExpired() {

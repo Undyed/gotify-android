@@ -287,10 +287,9 @@ internal class MessageStore(private val dir: File) {
 
         // FORK: one store per process, shared by the activity and the websocket service so that
         // both never write the same files from separate in-memory caches.
-        fun get(context: Context): MessageStore =
-            instance ?: synchronized(this) {
-                instance ?: MessageStore(context.applicationContext).also { instance = it }
-            }
+        fun get(context: Context): MessageStore = instance ?: synchronized(this) {
+            instance ?: MessageStore(context.applicationContext).also { instance = it }
+        }
 
         private const val DIRECTORY = "offline"
         private const val FILE_PREFIX = "messages-"

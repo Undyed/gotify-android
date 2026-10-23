@@ -18,9 +18,11 @@ internal class Settings(context: Context) {
             sharedPreferences.edit { putString("url", value) }
             EndpointResolver.onPrimaryChanged()
         }
+
     // FORK: the configured (public) address, independent of the currently selected endpoint
     val storedUrl: String
         get() = sharedPreferences.getString("url", "")!!
+
     // FORK: optional internal address, stored in the default preferences (settings screen)
     var backupUrl: String
         get() = defaultPreferences.getString("backupUrl", "") ?: ""

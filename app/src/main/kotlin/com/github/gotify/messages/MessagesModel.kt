@@ -14,6 +14,7 @@ import com.github.gotify.messages.provider.MessageState
 internal class MessagesModel(parentView: Activity) : ViewModel() {
     val settings = Settings(parentView)
     val store = MessageStore.get(parentView) // FORK: process wide offline cache
+
     // FORK: the client below is pinned to this base URL, used to detect endpoint switches
     val clientBaseUrl = settings.url
     val client = ClientFactory.clientToken(settings)
