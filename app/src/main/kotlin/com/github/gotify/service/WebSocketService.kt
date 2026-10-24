@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import androidx.annotation.RequiresApi
@@ -69,6 +70,10 @@ internal class WebSocketService : Service() {
 
     private lateinit var settings: Settings
     private var connection: WebSocketConnection? = null
+
+    @Volatile
+    private var lastWifiTransport: Boolean? = null // FORK
+
     private val networkCallback: ConnectivityManager.NetworkCallback =
         object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -76,6 +81,32 @@ internal class WebSocketService : Service() {
                 Logger.info("WebSocket: Network available, reconnect if needed.")
                 EndpointResolver.probeAsync() // FORK: may switch between intranet/extranet
                 connection?.start()
+            }
+
+            override fun onLost(network: Network) {
+                super.onLost(network)
+                Logger.info("WebSocket: Network lost, re-evaluating the endpoint.")
+                // FORK: EndpointResolver restarts the service, which closes the old connection and
+                // creates a fresh one for the new URL. Do not call connection.close() here: its
+                // onClose callback would query the old (intranet) endpoint again.
+                EndpointResolver.onNetworkChanged()
+            }
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                networkCapabilities: NetworkCapabilities
+            ) {
+                super.onCapabilitiesChanged(network, networkCapabilities)
+                val wifi = networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    !networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                val previous = lastWifiTransport
+                lastWifiTransport = wifi
+                if (previous != null && previous != wifi) {
+                    // FORK: Wi-Fi turned on/off (or a VPN came up). Prefer the matching address.
+                    EndpointResolver.onNetworkChanged()
+                } else {
+                    EndpointResolver.probeAsync()
+                }
             }
 
             override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
@@ -93,20 +124,35 @@ internal class WebSocketService : Service() {
     private lateinit var prefs: ForkPrefs // FORK
 
     private lateinit var markwon: Markwon
+    private var ready = false // FORK
 
     override fun onCreate() {
         super.onCreate()
         settings = Settings(this)
         store = MessageStore.get(this) // FORK
         prefs = ForkPrefs(this) // FORK
+        if (!settings.hasValidUrl) {
+            // FORK: an invalid/missing server URL would make ClientFactory throw here and kill the
+            // process. Stop quietly; InitializationActivity sends the user to the login screen.
+            Logger.error("WebSocketService: no valid server URL configured, stopping")
+            stopSelf()
+            return
+        }
         val persisted = prefs.lastReceivedMessageId
         if (persisted > 0) {
             lastReceivedMessage.set(persisted)
         }
-        val client = ClientFactory.clientToken(settings)
-        missingMessageUtil = MissedMessageUtil(client.createService(MessageApi::class.java))
+        try {
+            val client = ClientFactory.clientToken(settings)
+            missingMessageUtil = MissedMessageUtil(client.createService(MessageApi::class.java))
+            markwon = MarkwonFactory.createForNotification(this, CoilInstance.get(this))
+            ready = true
+        } catch (e: Exception) {
+            Logger.error(e, "WebSocketService: could not initialize")
+            stopSelf()
+            return
+        }
         Logger.info("Create ${javaClass.simpleName}")
-        markwon = MarkwonFactory.createForNotification(this, CoilInstance.get(this))
     }
 
     override fun onDestroy() {
@@ -122,6 +168,12 @@ internal class WebSocketService : Service() {
         LoggerHelper.init(this)
         UncaughtExceptionHandler.registerCurrentThread()
 
+        if (!ready) {
+            // onCreate() bailed out (no valid URL / initialization failure).
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         connection?.close()
         Logger.info("Starting ${javaClass.simpleName}")
         super.onStartCommand(intent, flags, startId)
@@ -131,6 +183,21 @@ internal class WebSocketService : Service() {
     }
 
     private fun startPushService() {
+        try {
+            startPushServiceUnsafe()
+        } catch (e: Exception) {
+            // Never let an exception on this background thread kill the app.
+            Logger.error(e, "WebSocketService: could not start the connection")
+            stopSelf()
+        }
+    }
+
+    private fun startPushServiceUnsafe() {
+        if (!settings.hasValidUrl) {
+            Logger.error("WebSocketService: server URL became invalid, stopping")
+            stopSelf()
+            return
+        }
         UncaughtExceptionHandler.registerCurrentThread()
         showForegroundNotification(getString(R.string.websocket_init))
 

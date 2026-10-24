@@ -19,6 +19,10 @@ internal class MessageRequester(private val messageApi: MessageApi) {
         } catch (apiException: ApiException) {
             Logger.error(apiException, "failed requesting messages")
             null
+        } catch (e: Exception) {
+            // FORK: an unexpected client error must not escape into the lifecycle coroutine.
+            Logger.error(e, "failed requesting messages")
+            null
         }
     }
 
@@ -43,6 +47,9 @@ internal class MessageRequester(private val messageApi: MessageApi) {
             }
             true
         } catch (e: ApiException) {
+            Logger.error(e, "Could not delete messages")
+            false
+        } catch (e: Exception) {
             Logger.error(e, "Could not delete messages")
             false
         }

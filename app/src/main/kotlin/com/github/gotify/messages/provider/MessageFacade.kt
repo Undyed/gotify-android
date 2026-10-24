@@ -5,6 +5,7 @@ import com.github.gotify.client.model.Message
 import com.github.gotify.fork.EndpointResolver
 import com.github.gotify.fork.MessageStore
 import com.github.gotify.fork.PendingSync
+import java.util.concurrent.ConcurrentHashMap
 
 internal class MessageFacade(
     api: MessageApi,
@@ -13,6 +14,9 @@ internal class MessageFacade(
 ) {
     private val requester = MessageRequester(api)
     private val state = MessageStateHolder()
+
+    // FORK: network loads run outside the monitor; this only prevents duplicate requests.
+    private val loadingApps = ConcurrentHashMap.newKeySet<Long>()
 
     // FORK: true when the last network load failed and the list shows cached data
     @Volatile
@@ -24,7 +28,8 @@ internal class MessageFacade(
         return MessageImageCombiner.combine(state.state(appId).messages, applicationHolder.get())
     }
 
-    @Synchronized
+    // FORK: no monitor here. store.append() can read a cache file from disk and must never block
+    // get()/canLoadMore() which are called from the UI thread.
     fun addMessages(messages: List<Message>) {
         // FORK: keep messages the service did not persist itself, e.g. missed messages fetched by
         // the activity while the websocket was still reconnecting.
@@ -34,13 +39,21 @@ internal class MessageFacade(
         }
     }
 
-    @Synchronized
+    // FORK: the network call deliberately runs without holding a lock. Previously loadMore() was
+    // @Synchronized, so canLoadMore()/get() on the main thread blocked for the whole HTTP timeout
+    // and the first screen appeared to freeze.
     fun loadMore(appId: Long): List<MessageWithImage> {
         val messageState = state.state(appId)
-        if (messageState.hasNext || !messageState.loaded || messageState.fromCache) {
+        if (!messageState.hasNext && messageState.loaded && !messageState.fromCache) {
+            return get(appId)
+        }
+        if (!loadingApps.add(appId)) {
+            return get(appId)
+        }
+        try {
             val pagedMessages = requester.loadMore(messageState)
             if (pagedMessages != null) {
-                this.state.newMessages(appId, pagedMessages)
+                state.newMessages(appId, pagedMessages)
                 offline = false
                 EndpointResolver.onRequestSucceeded() // FORK: remember the working endpoint
                 store?.let {
@@ -53,11 +66,12 @@ internal class MessageFacade(
                 EndpointResolver.onRequestFailed() // FORK: maybe the other address is reachable
                 hydrate(appId)
             }
+        } finally {
+            loadingApps.remove(appId)
         }
         return get(appId)
     }
 
-    @Synchronized
     fun loadMoreIfNotPresent(appId: Long) {
         val messageState = state.state(appId)
         if (!messageState.loaded || messageState.fromCache) {
@@ -96,7 +110,7 @@ internal class MessageFacade(
     @Synchronized
     fun undoDeleteLocal(): MessageDeletion? = state.undoPendingDeletion()
 
-    @Synchronized
+    // FORK: no monitor here either, deleteAll() blocks on the network.
     fun deleteAll(appId: Long): Boolean {
         val success = requester.deleteAll(appId)
         state.deleteAll(appId)
@@ -112,6 +126,17 @@ internal class MessageFacade(
 
     @Synchronized
     fun canLoadMore(appId: Long): Boolean = state.state(appId).hasNext
+
+    // FORK: true once the list (cache or network) has been loaded for this view.
+    fun isLoaded(appId: Long): Boolean = state.state(appId).loaded
+
+    // FORK: show cached messages immediately, without waiting for a network round trip.
+    fun hydrateFromCache(appId: Long): List<MessageWithImage> {
+        if (!state.state(appId).loaded) {
+            hydrate(appId)
+        }
+        return get(appId)
+    }
 
     // FORK: show cached messages while offline
     private fun hydrate(appId: Long) {

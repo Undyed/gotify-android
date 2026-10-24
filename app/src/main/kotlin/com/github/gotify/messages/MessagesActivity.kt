@@ -9,6 +9,8 @@ import android.content.IntentFilter
 import android.graphics.Canvas
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.Bundle
 import android.view.Menu
@@ -51,6 +53,8 @@ import com.github.gotify.client.model.Application
 import com.github.gotify.client.model.Message
 import com.github.gotify.databinding.ActivityMessagesBinding
 import com.github.gotify.fork.EndpointResolver
+import com.github.gotify.fork.ServerAddressesDialog
+import com.github.gotify.fork.normalizeEndpoint
 import com.github.gotify.init.InitializationActivity
 import com.github.gotify.log.LogsActivity
 import com.github.gotify.login.LoginActivity
@@ -77,11 +81,29 @@ internal class MessagesActivity :
     private var offlineNotified = false // FORK
     private var sessionDialogShown = false // FORK
     private var receiverRegistered = false // FORK
+    private var networkCallbackRegistered = false // FORK
+    private var reloadRequested = false // FORK
     private lateinit var listMessageAdapter: ListMessageAdapter
     private lateinit var onBackPressedCallback: OnBackPressedCallback
 
+    // FORK: turning Wi-Fi off does not always trigger a websocket failure immediately. React to the
+    // network going away here as well, so the endpoint (and the pinned Retrofit client) is
+    // re-evaluated without waiting for the next failed request.
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onLost(network: Network) {
+            super.onLost(network)
+            EndpointResolver.onNetworkChanged()
+        }
+    }
+
     private val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            // FORK: the selected endpoint changed (network switch or manual selection).
+            if (intent.action == EndpointResolver.ENDPOINT_CHANGED_BROADCAST) {
+                updateHeaderEndpoint()
+                refreshFromNetwork()
+                return
+            }
             // FORK: refresh the list as soon as the websocket is connected again
             if (intent.action == WebSocketService.CONNECTED_BROADCAST) {
                 refreshFromNetwork()
@@ -100,6 +122,15 @@ internal class MessagesActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // FORK: never build a Retrofit client (below) with a missing/invalid address: it throws
+        // and kills the process. Send the user back to the login screen instead.
+        val startupSettings = Settings(this)
+        if (!startupSettings.tokenExists() || !startupSettings.hasValidUrl) {
+            Logger.warn("No valid session/URL, returning to login")
+            startActivity(Intent(this, LoginActivity::class.java))
+            finish()
+            return
+        }
         binding = ActivityMessagesBinding.inflate(layoutInflater)
         setContentView(binding.root)
         viewModel = ViewModelProvider(this, MessagesModelFactory(this))[MessagesModel::class.java]
@@ -172,18 +203,33 @@ internal class MessagesActivity :
             .getBoolean(getString(R.string.setting_key_exclude_from_recent), false)
         Utils.setExcludeFromRecent(this, excludeFromRecent)
         launchCoroutine {
-            // FORK: when the websocket is already connected start from the network, otherwise show
-            // the offline cache first and refresh once the connection is back.
-            if (WebSocketService.connected) {
-                viewModel.messages.clear()
+            try {
+                // FORK: never block the first screen on the network. Show the cached messages
+                // right away, then refresh from the server in the background.
+                withContext(Dispatchers.Main) {
+                    if (!isFinishing && !isDestroyed) startLoading()
+                }
+                val cached = viewModel.messages.hydrateFromCache(viewModel.appId)
+                if (cached.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        updateMessagesAndStopLoading(cached)
+                    }
+                }
+                updateMessagesForApplication(cached.isEmpty(), viewModel.appId)
+            } catch (e: Exception) {
+                Logger.error(e, "Could not load the initial message list")
+                withContext(Dispatchers.Main) {
+                    updateMessagesAndStopLoading(viewModel.messages[viewModel.appId])
+                }
             }
-            updateMessagesForApplication(true, viewModel.appId)
         }
         validateSession() // FORK
     }
 
     override fun onPostCreate(savedInstanceState: Bundle?) {
         super.onPostCreate(savedInstanceState)
+        // FORK: onCreate may have finished early without inflating the layout.
+        if (!::binding.isInitialized) return
         binding.learnGotify.setOnClickListener { openDocumentation() }
     }
 
@@ -211,10 +257,14 @@ internal class MessagesActivity :
     }
 
     private fun onUpdateApps(applications: List<Application>) {
+        if (isFinishing || isDestroyed) return
         val menu: Menu = binding.navView.menu
         menu.removeGroup(R.id.apps)
         viewModel.targetReferences.clear()
-        updateMessagesAndStopLoading(viewModel.messages[viewModel.appId])
+        // FORK: do not stop the initial loading spinner just because the app list arrived first.
+        if (viewModel.messages.isLoaded(viewModel.appId)) {
+            updateMessagesAndStopLoading(viewModel.messages[viewModel.appId])
+        }
         var selectedItem = menu.findItem(R.id.nav_all_messages)
         applications.indices.forEach { index ->
             val app = applications[index]
@@ -259,7 +309,6 @@ internal class MessagesActivity :
         val connection = headerView.findViewById<TextView>(R.id.header_connection)
         connection.text = settings.url
         connection.setOnClickListener { showEndpointDialog() } // FORK
-
         val version = headerView.findViewById<TextView>(R.id.header_version)
         version.text =
             getString(R.string.versions, BuildConfig.VERSION_NAME, settings.serverVersion)
@@ -300,6 +349,9 @@ internal class MessagesActivity :
                 .show()
         } else if (id == R.id.nav_logs) {
             startActivity(Intent(this, LogsActivity::class.java))
+        } else if (id == R.id.nav_server_addresses) {
+            // FORK: first-class entry point for the public/internal server addresses
+            showServerAddressesDialog()
         } else if (id == R.id.settings) {
             startActivity(Intent(this, SettingsActivity::class.java))
         } else if (id == R.id.push_message) {
@@ -328,20 +380,34 @@ internal class MessagesActivity :
     }
 
     override fun onResume() {
+        // FORK: onCreate can finish early (invalid session/URL) before the ViewModel exists.
+        if (!::viewModel.isInitialized) {
+            super.onResume()
+            return
+        }
         // FORK: the endpoint can change while this activity is in the background (automatic probe
         // or a new internal address in the settings), the pinned Retrofit client would go stale.
-        if (viewModel.clientBaseUrl != viewModel.settings.url) {
+        if (normalizeEndpoint(viewModel.clientBaseUrl) !=
+            normalizeEndpoint(viewModel.settings.url)
+        ) {
+            super.onResume()
+            reloadForEndpoint()
+            return
+        }
+        if (!viewModel.settings.hasValidUrl) {
             super.onResume()
             reloadForEndpoint()
             return
         }
         Logger.info("OnResume " + javaClass.simpleName)
+        updateHeaderEndpoint()
         val context = applicationContext
         val nManager = context.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nManager.cancelAll()
         val filter = IntentFilter()
         filter.addAction(WebSocketService.NEW_MESSAGE_BROADCAST)
         filter.addAction(WebSocketService.CONNECTED_BROADCAST) // FORK
+        filter.addAction(EndpointResolver.ENDPOINT_CHANGED_BROADCAST) // FORK
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(receiver, filter, RECEIVER_EXPORTED)
         } else {
@@ -349,8 +415,22 @@ internal class MessagesActivity :
             registerReceiver(receiver, filter)
         }
         receiverRegistered = true // FORK
+        registerNetworkCallback()
+        EndpointResolver.probeForCurrentNetwork() // FORK: try the intranet address on Wi-Fi
         launchCoroutine {
-            updateMissedMessages(viewModel.messages.getLastReceivedMessage())
+            try {
+                // FORK: onResume can run before the startup coroutine finished hydrating the
+                // cache. Make sure the newest cached id is known before asking for missed
+                // messages.
+                var lastReceived = viewModel.messages.getLastReceivedMessage()
+                if (lastReceived == -1L) {
+                    viewModel.messages.hydrateFromCache(viewModel.appId)
+                    lastReceived = viewModel.messages.getLastReceivedMessage()
+                }
+                updateMissedMessages(lastReceived)
+            } catch (e: Exception) {
+                Logger.error(e, "Could not fetch missed messages")
+            }
         }
         var selectedIndex = R.id.nav_all_messages
         val appId = viewModel.appId
@@ -374,7 +454,32 @@ internal class MessagesActivity :
             unregisterReceiver(receiver)
             receiverRegistered = false
         }
+        if (networkCallbackRegistered) {
+            runCatching {
+                (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager)
+                    .unregisterNetworkCallback(networkCallback)
+            }
+            networkCallbackRegistered = false
+        }
         super.onPause()
+    }
+
+    private fun registerNetworkCallback() {
+        if (networkCallbackRegistered) return
+        runCatching {
+            val manager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            manager.registerDefaultNetworkCallback(networkCallback)
+            networkCallbackRegistered = true
+        }.onFailure {
+            Logger.error(it, "Could not register the network callback")
+        }
+    }
+
+    private fun updateHeaderEndpoint() {
+        if (!::viewModel.isInitialized || isFinishing || isDestroyed) return
+        binding.navView.getHeaderView(0)
+            .findViewById<TextView>(R.id.header_connection)
+            ?.text = viewModel.settings.url
     }
 
     private fun selectAppInMenu(appItem: MenuItem?) {
@@ -533,7 +638,7 @@ internal class MessagesActivity :
         }
     }
 
-    private suspend fun updateMissedMessages(id: Long) {
+    private suspend fun updateMissedMessages(id: Long, withLoadingSpinner: Boolean = false) {
         if (id == -1L) return
 
         val newMessages = MissedMessageUtil(viewModel.client.createService(MessageApi::class.java))
@@ -541,11 +646,12 @@ internal class MessagesActivity :
         viewModel.messages.addMessages(newMessages)
 
         if (newMessages.isNotEmpty()) {
-            updateMessagesForApplication(true, viewModel.appId)
+            updateMessagesForApplication(withLoadingSpinner, viewModel.appId)
         }
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        if (!::viewModel.isInitialized) return false
         menuInflater.inflate(R.menu.messages_action, menu)
         menu.findItem(R.id.action_delete_app).isVisible =
             viewModel.appId != MessageState.ALL_MESSAGES
@@ -553,6 +659,7 @@ internal class MessagesActivity :
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (!::viewModel.isInitialized) return false
         if (item.itemId == R.id.action_delete_all) {
             MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.delete_all)
@@ -588,8 +695,10 @@ internal class MessagesActivity :
             withContext(Dispatchers.Main) {
                 startLoading()
             }
+            viewModel.messages.loadMoreIfNotPresent(appId)
         }
-        viewModel.messages.loadMoreIfNotPresent(appId)
+        // FORK: without the spinner this is a pure UI refresh. Loading another page here would
+        // delay already available (cached / just received) messages behind a network round trip.
         withContext(Dispatchers.Main) {
             updateMessagesAndStopLoading(viewModel.messages[appId])
         }
@@ -621,6 +730,13 @@ internal class MessagesActivity :
 
     private fun deleteClientAndNavigateToLogin() {
         val settings = viewModel.settings
+        if (!settings.hasValidUrl) {
+            stopService(Intent(this@MessagesActivity, WebSocketService::class.java))
+            settings.clear()
+            startActivity(Intent(this@MessagesActivity, LoginActivity::class.java))
+            finish()
+            return
+        }
         val tokenClient = ClientFactory.clientToken(settings)
         stopService(Intent(this@MessagesActivity, WebSocketService::class.java))
         try {
@@ -658,6 +774,7 @@ internal class MessagesActivity :
     }
 
     private fun updateMessagesAndStopLoading(messageWithImages: List<MessageWithImage>) {
+        if (isFinishing || isDestroyed) return
         isLoadMore = false
         stopLoading()
         if (viewModel.messages.offline && !offlineNotified) { // FORK
@@ -683,64 +800,94 @@ internal class MessagesActivity :
 
     // FORK-BEGIN: offline mode, background session validation and endpoint switching
     private fun refreshFromNetwork() {
-        if (isFinishing || isDestroyed) return
+        if (!::viewModel.isInitialized || isFinishing || isDestroyed) return
         // The Retrofit client is bound to the URL it was created with, so a switched endpoint
         // needs a fresh activity/model instead of a simple reload.
-        if (viewModel.clientBaseUrl != viewModel.settings.url) {
+        if (normalizeEndpoint(viewModel.clientBaseUrl) !=
+            normalizeEndpoint(viewModel.settings.url)
+        ) {
+            reloadForEndpoint()
+            return
+        }
+        if (!viewModel.settings.hasValidUrl) {
             reloadForEndpoint()
             return
         }
         launchCoroutine {
-            viewModel.messages.clear()
-            updateMessagesForApplication(true, viewModel.appId)
+            // FORK: do not clear the hydrated cache here. On a reconnect only the missing (newer)
+            // messages are fetched, so the cached history stays on screen and no loading spinner
+            // is shown over data the user can already read.
+            val lastReceived = viewModel.messages.getLastReceivedMessage()
+            if (lastReceived == -1L || !viewModel.messages.isLoaded(viewModel.appId)) {
+                updateMessagesForApplication(true, viewModel.appId)
+            } else {
+                updateMissedMessages(lastReceived)
+            }
         }
     }
 
     // Same as refreshAll(), but keeps the image cache: both addresses serve the same server.
     private fun reloadForEndpoint() {
-        if (isFinishing || isDestroyed) return
+        if (reloadRequested || isFinishing || isDestroyed) return
+        reloadRequested = true
         startActivity(Intent(this, InitializationActivity::class.java))
         finish()
     }
 
     private fun validateSession() {
-        ClientFactory.userApiWithToken(viewModel.settings).currentUser().enqueue(
-            Callback.callInUI(
-                this,
-                onSuccess = Callback.SuccessBody { user ->
-                    viewModel.settings.setUser(user.name, user.admin)
-                    updateHeaderUser()
-                    fetchServerVersion()
-                },
-                onError = { exception ->
-                    if (exception.code == 401) {
-                        showSessionExpired()
+        if (isFinishing || isDestroyed) return
+        try {
+            ClientFactory.userApiWithToken(viewModel.settings).currentUser().enqueue(
+                Callback.callInUI(
+                    this,
+                    onSuccess = Callback.SuccessBody { user ->
+                        if (!isFinishing && !isDestroyed) {
+                            viewModel.settings.setUser(user.name, user.admin)
+                            updateHeaderUser()
+                            fetchServerVersion()
+                        }
+                    },
+                    onError = { exception ->
+                        if (!isFinishing && !isDestroyed && exception.code == 401) {
+                            showSessionExpired()
+                        }
                     }
-                }
+                )
             )
-        )
+        } catch (e: Exception) {
+            Logger.error(e, "Could not validate the session")
+        }
     }
 
     private fun fetchServerVersion() {
-        ClientFactory.infoApi(viewModel.settings).version.enqueue(
-            Callback.callInUI(
-                this,
-                onSuccess = Callback.SuccessBody { version ->
-                    viewModel.settings.serverVersion = version.version
-                    updateHeaderVersion()
-                },
-                onError = {}
+        if (isFinishing || isDestroyed) return
+        try {
+            ClientFactory.infoApi(viewModel.settings).version.enqueue(
+                Callback.callInUI(
+                    this,
+                    onSuccess = Callback.SuccessBody { version ->
+                        if (!isFinishing && !isDestroyed) {
+                            viewModel.settings.serverVersion = version.version
+                            updateHeaderVersion()
+                        }
+                    },
+                    onError = {}
+                )
             )
-        )
+        } catch (e: Exception) {
+            Logger.error(e, "Could not fetch the server version")
+        }
     }
 
     private fun updateHeaderUser() {
+        if (isFinishing || isDestroyed) return
         binding.navView.getHeaderView(0)
             .findViewById<TextView>(R.id.header_user)
             ?.text = viewModel.settings.user?.name
     }
 
     private fun updateHeaderVersion() {
+        if (isFinishing || isDestroyed) return
         val version = getString(
             R.string.versions,
             BuildConfig.VERSION_NAME,
@@ -752,21 +899,26 @@ internal class MessagesActivity :
     }
 
     private fun showSessionExpired() {
-        if (sessionDialogShown || isFinishing) return
+        if (sessionDialogShown || isFinishing || isDestroyed) return
         sessionDialogShown = true
-        MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.fork_session_expired_title)
-            .setMessage(R.string.fork_session_expired)
-            .setPositiveButton(R.string.login) { _, _ -> doLogout() }
-            .setCancelable(false)
-            .show()
+        try {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.fork_session_expired_title)
+                .setMessage(R.string.fork_session_expired)
+                .setPositiveButton(R.string.login) { _, _ -> doLogout() }
+                .setCancelable(false)
+                .show()
+        } catch (e: Exception) {
+            Logger.error(e, "Could not show the session dialog")
+        }
     }
 
     private fun showEndpointDialog() {
+        if (isFinishing || isDestroyed) return
         val settings = viewModel.settings
         val endpoints = listOfNotNull(
-            settings.storedUrl.takeIf { it.isNotBlank() },
-            settings.backupUrl.takeIf { it.isNotBlank() }
+            normalizeEndpoint(settings.storedUrl),
+            normalizeEndpoint(settings.backupUrl)
         ).distinct()
         val labels = mutableListOf(getString(R.string.fork_endpoint_auto))
         labels.addAll(endpoints)
@@ -780,7 +932,25 @@ internal class MessagesActivity :
                 }
                 refreshFromNetwork()
             }
+            .setNeutralButton(R.string.fork_edit_addresses) { _, _ ->
+                showServerAddressesDialog()
+            }
             .show()
+    }
+
+    private fun showServerAddressesDialog() {
+        if (isFinishing || isDestroyed) return
+        ServerAddressesDialog.show(this, viewModel.settings) {
+            if (!isFinishing && !isDestroyed) {
+                if (normalizeEndpoint(viewModel.clientBaseUrl) !=
+                    normalizeEndpoint(viewModel.settings.url)
+                ) {
+                    reloadForEndpoint()
+                } else {
+                    refreshFromNetwork()
+                }
+            }
+        }
     }
     // FORK-END
 

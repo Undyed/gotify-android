@@ -26,6 +26,12 @@
             android:orderInCategory="2"
             android:id="@+id/settings"
             android:title="@string/title_activity_settings" />
+        <!-- FORK: public/internal address editor, easy to find from the drawer -->
+        <item
+            android:icon="@drawable/ic_info"
+            android:orderInCategory="2"
+            android:id="@+id/nav_server_addresses"
+            android:title="@string/fork_server_addresses_title" />
         <item
             android:orderInCategory="2"
             android:icon="@drawable/ic_bug_report"

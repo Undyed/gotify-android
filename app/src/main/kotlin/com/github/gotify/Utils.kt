@@ -28,8 +28,15 @@ internal object Utils {
     val JSON: Gson = JSON().gson
 
     fun showSnackBar(activity: Activity, message: String?) {
-        val rootView = activity.window.decorView.findViewById<View>(android.R.id.content)
-        Snackbar.make(rootView, message!!, Snackbar.LENGTH_SHORT).show()
+        // FORK: api callbacks can arrive after the activity was finished/destroyed. Touching the
+        // window at that point throws and used to crash the app.
+        if (activity.isFinishing || activity.isDestroyed) return
+        try {
+            val rootView = activity.window.decorView.findViewById<View>(android.R.id.content)
+            Snackbar.make(rootView, message.orEmpty(), Snackbar.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Logger.error(e, "Could not show snackbar")
+        }
     }
 
     fun longToInt(value: Long): Int {

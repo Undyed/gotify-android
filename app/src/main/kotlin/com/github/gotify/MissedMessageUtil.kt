@@ -43,6 +43,8 @@ internal class MissedMessageUtil(private val api: MessageApi) {
             }
         } catch (e: ApiException) {
             Logger.error(e, "cannot retrieve missing messages")
+        } catch (e: Exception) {
+            Logger.error(e, "cannot retrieve missing messages")
         }
         return result.reversed()
     }

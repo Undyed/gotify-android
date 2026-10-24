@@ -10,4 +10,24 @@
     <string name="fork_endpoint_auto">Automatic</string>
     <string name="fork_session_expired_title">Login required</string>
     <string name="fork_session_expired">Your session is no longer valid. Please log in again.</string>
+
+    <string name="fork_server_addresses_title">Server addresses</string>
+    <string name="fork_server_addresses_summary">Public and internal address of the same Gotify server</string>
+    <string name="fork_server_addresses_public">Public address</string>
+    <string name="fork_server_addresses_internal">Internal address (optional)</string>
+    <string name="fork_server_addresses_public_hint">https://gotify.example.com</string>
+    <string name="fork_server_addresses_internal_hint">http://192.168.1.10:8080</string>
+    <string name="fork_server_addresses_help">Use the public address outside your home network and the internal address at home. You may omit http:// or https://; it is guessed from the address.</string>
+    <string name="fork_server_addresses_prefer_internal">Prefer the internal address on Wi-Fi</string>
+    <string name="fork_server_addresses_prefer_internal_summary">Switch to the internal address automatically when connected to Wi-Fi.</string>
+    <string name="fork_server_addresses_invalid">Enter a valid http:// or https:// address</string>
+    <string name="fork_server_addresses_saved">Server addresses saved</string>
+    <string name="fork_server_addresses_testing">Testing addresses…</string>
+    <string name="fork_server_addresses_test_ok">reachable</string>
+    <string name="fork_server_addresses_test_failed">not reachable</string>
+    <string name="fork_server_addresses_current">Current: %1$s</string>
+    <string name="fork_server_addresses_not_set">not set</string>
+    <string name="fork_edit_addresses">Edit addresses</string>
+    <string name="fork_test">Test</string>
+    <string name="fork_save">Save</string>
 </resources>

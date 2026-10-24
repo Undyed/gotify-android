@@ -6,16 +6,21 @@ import androidx.core.content.edit
 import androidx.preference.PreferenceManager
 import com.github.gotify.client.model.User
 import com.github.gotify.fork.EndpointResolver
+import com.github.gotify.fork.normalizeEndpoint
 
 internal class Settings(context: Context) {
     private val sharedPreferences: SharedPreferences
     private val defaultPreferences: SharedPreferences
     val filesDir: String
     var url: String
-        // FORK: follow the endpoint currently selected (public or intranet address)
-        get() = EndpointResolver.current ?: sharedPreferences.getString("url", "")!!
+        // FORK: follow the endpoint currently selected (public or intranet address). Invalid stored
+        // values are ignored so that Retrofit never receives a malformed base URL.
+        get() = EndpointResolver.current
+            ?: normalizeEndpoint(sharedPreferences.getString("url", ""))
+            ?: normalizeEndpoint(defaultPreferences.getString("backupUrl", ""))
+            ?: ""
         set(value) {
-            sharedPreferences.edit { putString("url", value) }
+            sharedPreferences.edit { putString("url", normalizeEndpoint(value) ?: value.trim()) }
             EndpointResolver.onPrimaryChanged()
         }
 
@@ -23,10 +28,14 @@ internal class Settings(context: Context) {
     val storedUrl: String
         get() = sharedPreferences.getString("url", "")!!
 
+    // FORK: true when a usable server address is configured
+    val hasValidUrl: Boolean
+        get() = normalizeEndpoint(url) != null
+
     // FORK: optional internal address, stored in the default preferences (settings screen)
     var backupUrl: String
         get() = defaultPreferences.getString("backupUrl", "") ?: ""
-        set(value) = defaultPreferences.edit { putString("backupUrl", value) }
+        set(value) = defaultPreferences.edit { putString("backupUrl", value.trim()) }
     var token: String?
         get() = sharedPreferences.getString("token", null)
         set(value) = sharedPreferences.edit { putString("token", value) }

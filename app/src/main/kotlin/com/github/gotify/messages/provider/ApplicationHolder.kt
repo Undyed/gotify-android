@@ -34,19 +34,27 @@ internal class ApplicationHolder(
     private fun onReceiveApps(apps: List<Application>) {
         state = apps
         store?.saveApps(apps) // FORK: keep the list for offline use
-        if (onUpdate != null) onUpdate!!.run()
+        notifyUpdate()
     }
 
     private fun onFailedApps() {
         val cached = store?.loadApps().orEmpty() // FORK: fall back to the offline cache
         if (cached.isNotEmpty()) {
             state = cached
-            if (onUpdate != null) onUpdate!!.run()
+            notifyUpdate()
             return
         }
+        if (!activityAlive()) return
         Utils.showSnackBar(activity, "Could not request applications, see logs.")
-        if (onUpdateFailed != null) onUpdateFailed!!.run()
+        onUpdateFailed?.run()
     }
+
+    private fun notifyUpdate() {
+        if (!activityAlive()) return
+        onUpdate?.run()
+    }
+
+    private fun activityAlive(): Boolean = !activity.isFinishing && !activity.isDestroyed
 
     fun get() = state
 

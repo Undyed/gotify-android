@@ -19,11 +19,15 @@ import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
 import androidx.preference.SwitchPreferenceCompat
 import com.github.gotify.R
+import com.github.gotify.Settings as AppSettings
 import com.github.gotify.Utils
 import com.github.gotify.databinding.SettingsActivityBinding
 import com.github.gotify.fork.EndpointResolver
+import com.github.gotify.fork.ServerAddressesDialog
+import com.github.gotify.fork.normalizeEndpoint
 import com.github.gotify.service.WebSocketService
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import org.tinylog.kotlin.Logger
 
 internal class SettingsActivity :
     AppCompatActivity(),
@@ -104,11 +108,26 @@ internal class SettingsActivity :
                     requestWebSocketRestart()
                     true
                 }
+            // FORK: the public/internal address editor
+            findPreference<Preference>(KEY_SERVER_ADDRESSES)?.setOnPreferenceClickListener {
+                ServerAddressesDialog.show(requireActivity(), AppSettings(requireContext())) {
+                    requestWebSocketRestart()
+                    Utils.showSnackBar(
+                        requireActivity(),
+                        getString(R.string.fork_server_addresses_saved)
+                    )
+                }
+                true
+            }
         }
 
         private fun requestWebSocketRestart() {
             val intent = Intent(requireContext(), WebSocketService::class.java)
-            requireContext().startService(intent)
+            try {
+                requireContext().startService(intent)
+            } catch (e: Exception) {
+                Logger.error(e, "Could not restart the websocket service")
+            }
         }
 
         override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
@@ -158,6 +177,17 @@ internal class SettingsActivity :
         override fun onResume() {
             super.onResume()
             checkSystemAlertWindowPermission()
+            updateServerAddressesSummary()
+        }
+
+        private fun updateServerAddressesSummary() {
+            val settings = AppSettings(requireContext())
+            val notSet = getString(R.string.fork_server_addresses_not_set)
+            val public = normalizeEndpoint(settings.storedUrl)
+                ?: settings.storedUrl.trim().ifBlank { notSet }
+            val internal = normalizeEndpoint(settings.backupUrl)
+                ?: settings.backupUrl.trim().ifBlank { notSet }
+            findPreference<Preference>(KEY_SERVER_ADDRESSES)?.summary = "$public\n$internal"
         }
 
         private fun openSystemAlertWindowPermissionPage(): Boolean {
@@ -214,6 +244,10 @@ internal class SettingsActivity :
             val mainIntent = Intent.makeRestartActivityTask(componentName)
             startActivity(mainIntent)
             Runtime.getRuntime().exit(0)
+        }
+
+        companion object {
+            private const val KEY_SERVER_ADDRESSES = "server_addresses"
         }
     }
 

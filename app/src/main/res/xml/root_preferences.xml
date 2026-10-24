@@ -63,13 +63,12 @@
             android:title="@string/setting_exponential_backoff_title"
             android:summary="@string/setting_exponential_backoff_summary"
             android:defaultValue="true" />
-        <!-- FORK: optional internal address for the same server -->
-        <EditTextPreference
-            android:key="backupUrl"
-            android:title="@string/fork_backup_url_title"
-            android:summary="@string/fork_backup_url_summary"
-            android:defaultValue=""
-            android:inputType="textUri" />
+        <!-- FORK: opens the validated editor for both server addresses (public + internal) -->
+        <Preference
+            android:key="server_addresses"
+            android:persistent="false"
+            android:title="@string/fork_server_addresses_title"
+            android:summary="@string/fork_server_addresses_summary" />
     </PreferenceCategory>
 
 </PreferenceScreen>

@@ -51,7 +51,7 @@ internal class ShareActivity : AppCompatActivity() {
             }
         }
 
-        if (!settings.tokenExists()) {
+        if (!settings.tokenExists() || !settings.hasValidUrl) {
             Toast.makeText(
                 applicationContext,
                 R.string.not_loggedin_share,

@@ -14,7 +14,18 @@ internal class ForkPrefs(context: Context) {
     var lastGoodEndpoint: String?
         get() = prefs.getString(KEY_ENDPOINT, null)
         set(value) {
-            prefs.edit().putString(KEY_ENDPOINT, value).apply()
+            // Only valid endpoints may ever become active: an invalid value here is replayed into
+            // Retrofit during the next cold start and would crash the app.
+            val endpoint = normalizeEndpoint(value)
+            prefs.edit().apply {
+                if (endpoint == null) remove(KEY_ENDPOINT) else putString(KEY_ENDPOINT, endpoint)
+            }.apply()
+        }
+
+    var preferInternalOnWifi: Boolean
+        get() = prefs.getBoolean(KEY_PREFER_INTERNAL, true)
+        set(value) {
+            prefs.edit().putBoolean(KEY_PREFER_INTERNAL, value).apply()
         }
 
     var lastReceivedMessageId: Long
@@ -38,6 +49,7 @@ internal class ForkPrefs(context: Context) {
     companion object {
         private const val NAME = "gotify_fork"
         private const val KEY_ENDPOINT = "lastGoodEndpoint"
+        private const val KEY_PREFER_INTERNAL = "preferInternalOnWifi"
         private const val KEY_LAST_MESSAGE = "lastReceivedMessageId"
         private const val KEY_LAST_BACKFILL = "lastBackfillAt"
         private const val BACKFILL_INTERVAL_HOURS = 6L

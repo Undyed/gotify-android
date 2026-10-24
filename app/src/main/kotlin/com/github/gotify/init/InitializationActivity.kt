@@ -40,7 +40,7 @@ internal class InitializationActivity : AppCompatActivity() {
 
         installSplashScreen().setKeepOnScreenCondition { splashScreenActive }
 
-        if (settings.tokenExists()) {
+        if (settings.tokenExists() && settings.hasValidUrl) {
             runWithPostNotificationsPermission {
                 if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU) {
                     // Android 14 and above
@@ -51,6 +51,11 @@ internal class InitializationActivity : AppCompatActivity() {
                 }
             }
         } else {
+            // FORK: without a usable address there is nothing to open; the login screen lets the
+            // user enter a correct one instead of crashing in MessagesActivity.
+            if (settings.tokenExists()) {
+                Logger.warn("Stored server URL is invalid, asking the user to log in again")
+            }
             showLogin()
         }
     }
@@ -83,10 +88,16 @@ internal class InitializationActivity : AppCompatActivity() {
 
     private fun startPushService() {
         val serviceIntent = Intent(this, WebSocketService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            // e.g. ForegroundServiceStartNotAllowedException on Android 12+; the service is
+            // restarted by BootCompletedReceiver or when the next message arrives.
+            Logger.error(e, "Could not start the websocket service")
         }
     }
     // FORK-END
